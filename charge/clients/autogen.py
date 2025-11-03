@@ -19,160 +19,6 @@ from typing import Type, Optional, Dict, Union, List, Any
 from charge.Experiment import Experiment
 from charge.clients.hf import HuggingFaceLocalClient
 
-class VLLMClient(ChatCompletionClient):
-    """Client for vLLM served models via OpenAI-compatible API"""
-    
-    def __init__(
-        self,
-        base_url: str = "http://localhost:8000/v1",
-        model_name: str = "gpt-oss",
-        api_key: str = "EMPTY",
-        reasoning_effort: str = "medium",
-        model_info: Optional[Dict[str, Any]] = None,
-        **kwargs
-    ):
-        """
-        Initialize vLLM client.
-        
-        Args:
-            base_url: vLLM server URL (default: http://localhost:8000/v1)
-            model_name: Model name as registered in vLLM
-            api_key: API key (usually "EMPTY" for local vLLM)
-            model_info: Model information dict
-            reasoning_effort: Reasoning level for GPT-OSS (low, medium, high)
-            **kwargs: Additional arguments
-        """
-        try:
-            from openai import AsyncOpenAI
-        except ImportError:
-            raise ImportError(
-                "Please install openai: pip install openai"
-            )
-        
-        self._base_url = base_url
-        self._model_name = model_name
-        self._client = AsyncOpenAI(
-            base_url=base_url,
-            api_key=api_key,
-        )
-        self._reasoning_effort = reasoning_effort
-        self._model_info = model_info or {
-            "vision": False,
-            "function_calling": True,
-            "json_output": True,
-            "family": ModelFamily.UNKNOWN,
-            "structured_output": True,
-        }
-
-    async def create(
-        self,
-        messages: List[Any],
-        **kwargs
-    ) -> CreateResult:
-        """
-        Create a completion from messages using vLLM.
-        
-        Args:
-            messages: List of message objects or dicts
-            **kwargs: Additional generation parameters
-        """
-        # Convert AutoGen message objects to OpenAI format
-        formatted_messages = []
-        for msg in messages:
-            if hasattr(msg, 'content') and hasattr(msg, 'source'):
-                # AutoGen message object
-                role = 'system' if msg.source == 'system' else 'user' if msg.source == 'user' else 'assistant'
-                formatted_messages.append({
-                    'role': role,
-                    'content': msg.content
-                })
-            elif isinstance(msg, dict):
-                formatted_messages.append(msg)
-            else:
-                content = getattr(msg, 'content', str(msg))
-                formatted_messages.append({
-                    'role': 'user',
-                    'content': content
-                })
-        
-        # Call vLLM API
-        try:
-            response = await self._client.chat.completions.create(
-                model=self._model_name,
-                messages=formatted_messages,
-                max_tokens=kwargs.get("max_tokens", 8192),
-                temperature=kwargs.get("temperature", 0.7),
-                top_p=kwargs.get("top_p", 0.9),
-                stream=False,
-                extra_body={"reasoning_effort": self._reasoning_effort},
-            )
-            
-            # Extract response content
-            message = response.choices[0].message
-            final_content = message.content
-            
-            # Get reasoning from reasoning_content field if available
-            analysis_content = getattr(message, 'reasoning_content', None)
-
-            ## Debug: Check reasoning and final content
-            #print(f"\n=== DEBUG VLLMClient ===")
-            #print(f"Analysis captured: {analysis_content is not None}")
-            #if analysis_content:
-            #    print(f"Analysis length: {len(analysis_content)}")
-            #    print(f"Analysis preview: {analysis_content[:300]}...")
-            #print(f"Final content length: {len(final_content)}")
-            #print(f"======================\n")
-            
-            # Return in AutoGen format (with reasoning in thought field)
-            return CreateResult(
-                content=final_content,
-                usage={
-                    "prompt_tokens": response.usage.prompt_tokens,
-                    "completion_tokens": response.usage.completion_tokens,
-                },
-                finish_reason=response.choices[0].finish_reason,
-                cached=False,
-                thought=analysis_content,
-            )
-        except Exception as e:
-            raise RuntimeError(f"Error calling vLLM: {e}")
-    
-    @property
-    def model_info(self) -> Dict[str, Any]:
-        """Return model information"""
-        return self._model_info
-    
-    def capabilities(self) -> dict:
-        """Return model capabilities"""
-        return self._model_info
-    
-    def count_tokens(self, messages: List[Any], **kwargs) -> int:
-        """Estimate token count (rough approximation)"""
-        # Rough estimate: 4 chars per token
-        total_chars = sum(len(str(m.get('content', '') if isinstance(m, dict) else getattr(m, 'content', ''))) for m in messages)
-        return total_chars // 4
-    
-    def remaining_tokens(self, messages: List[Any], **kwargs) -> int:
-        """Return remaining tokens available"""
-        used = self.count_tokens(messages, **kwargs)
-        return max(0, 8192 - used)  # Assume 8K context
-    
-    def total_usage(self) -> dict:
-        """Return total token usage"""
-        return {"prompt_tokens": 0, "completion_tokens": 0}
-    
-    def actual_usage(self) -> dict:
-        """Return actual token usage for last request"""
-        return {"prompt_tokens": 0, "completion_tokens": 0}
-    
-    async def create_stream(self, messages: List[Any], **kwargs):
-        """Stream completion - not yet implemented"""
-        raise NotImplementedError("Streaming not yet implemented for vLLM client")
-    
-    async def close(self):
-        """Clean up resources"""
-        await self._client.close()
-
 class AutoGenClient(Client):
     def __init__(
         self,
@@ -284,16 +130,65 @@ class AutoGenClient(Client):
                     "reasoning_effort", 
                     "medium"
                 )
-                print(f"\n  ==> vllm backend vllm_url: {vllm_url}")
-                print(f"\n  ==> vllm backend vllm_model: {vllm_model}")
-                print(f"\n  ==> oss reasoning: {reasoning_effort}")
 
-                self.model_client = VLLMClient(
+                #self.model_kwargs["max_tokens"] = 10000 # Doesn't seem to work
+                #print(f"\n  ==> MY model_kwargs: {self.model_kwargs}")
+                #print(f"\n  ==> vllm backend vllm_url: {vllm_url}")
+                #print(f"\n  ==> vllm backend vllm_model: {vllm_model}")
+                print(f"\n  ==> GPT-OSS reasoning effort: {reasoning_effort}")
+
+                from autogen_ext.models.openai import OpenAIChatCompletionClient
+                
+                vllm_model_info = {
+                    "vision": False,
+                    "function_calling": True,
+                    "json_output": False, #True, # TODO determine best choice
+                    "family": ModelFamily.UNKNOWN,
+                    "structured_output": False, #True, # TODO determine best choice
+                }
+                from charge.clients.reasoning import ReasoningCaptureClient
+                self.model_client = ReasoningCaptureClient(
+                    model=vllm_model,
+                    api_key="EMPTY",
                     base_url=vllm_url,
-                    model_name=vllm_model,
-                    model_info=model_info,
-                    reasoning_effort=reasoning_effort,
+                    model_info=vllm_model_info,
+                    parallel_tool_calls=False,
+                    extra_body={"reasoning_effort": reasoning_effort},
                 )
+                #from charge.clients.logging import LoggingModelClient, InspectingModelClient
+                #self.model_client = LoggingModelClient(
+                #    model=vllm_model,
+                #    api_key="EMPTY",
+                #    base_url=vllm_url,
+                #    model_info=vllm_model_info,
+                #    parallel_tool_calls=False,
+                #    extra_body={"reasoning_effort": reasoning_effort},
+                #)
+                #self.model_client = OpenAIChatCompletionClient(
+                #    model=vllm_model,
+                #    api_key="EMPTY",
+                #    base_url=vllm_url,
+                #    model_info=vllm_model_info,
+                #    parallel_tool_calls=False, # Seems more reliable when False
+                #    extra_body={"reasoning_effort": reasoning_effort},
+                #)
+
+                #from charge.clients.vllm import VLLMClient, VLLMOpenAIChatClient
+                #self.model_client = VLLMOpenAIChatClient(
+                #    model=vllm_model,
+                #    api_key="EMPTY",
+                #    base_url=vllm_url,
+                #    model_info=vllm_model_info,
+                #    parallel_tool_calls=False, # Seems more reliable when False
+                #    extra_body={"reasoning_effort": reasoning_effort},
+                #)
+                
+                #self.model_client = VLLMClient(
+                #    base_url=vllm_url,
+                #    model_name=vllm_model,
+                #    model_info=model_info,
+                #    reasoning_effort=reasoning_effort,
+                #)
             elif backend == "ollama":
                 from autogen_ext.models.ollama import OllamaChatCompletionClient
 
@@ -368,7 +263,7 @@ class AutoGenClient(Client):
         elif backend in ["huggingface"]:
             default_model = None  # Must be provided via local_model_path
         elif backend in ["vllm"]:
-            kwargs["reasoning_effort"] = "medium"
+            kwargs["reasoning_effort"] = os.getenv("OSS_REASONING", "medium")
             default_model = "gpt-oss"  # Default vLLM model name
 
         if not model:
@@ -391,6 +286,21 @@ class AutoGenClient(Client):
 
     async def step(self, agent, task: str):
         result = await agent.run(task=task)
+
+        # Debug: Check for tool calls in the result
+        ##print(f"\n=== DEBUG: Step Result ===")
+        ##print(f"Number of messages: {len(result.messages)}")
+        ##for i, msg in enumerate(result.messages):
+        ##    print(f"Message {i}: type={type(msg).__name__}")
+        ##    if hasattr(msg, 'content'):
+        ##        print(f"  Content: {str(msg.content)}")
+        ##        #print(f"  Content: {str(msg.content)[:200]}...")
+        ##    # Check for tool calls
+        ##    if hasattr(msg, 'tool_calls'):
+        ##        print(f"  Tool calls: {msg.tool_calls}")
+        ##    if hasattr(msg, 'function_call'):
+        ##        print(f"  Function call: {msg.function_call}")
+        ##print(f"========================\n")
 
         for msg in result.messages:
             if isinstance(msg, TextMessage):
@@ -422,6 +332,30 @@ class AutoGenClient(Client):
         return answer_invalid, result
 
     async def run(self):
+        # TODO: START REMOVE AFTER DEBUG
+        # Suppress verbose logging
+        import logging
+        
+        # Reduce DEBUG output from these loggers
+        logging.getLogger("openai._base_client").setLevel(logging.WARNING)
+        logging.getLogger("httpcore").setLevel(logging.WARNING)
+        logging.getLogger("httpx").setLevel(logging.WARNING)
+        logging.getLogger("mcp.client.sse").setLevel(logging.WARNING)
+        logging.getLogger("autogen_agentchat.events").setLevel(logging.WARNING)
+        
+        # Keep autogen_core.events at INFO level so ReasoningCapture still works
+        logging.getLogger("autogen_core.events").setLevel(logging.INFO)
+
+        # For autogen_core.events: remove default handlers but keep level at INFO
+        # so our ReasoningCapture handler still receives the events
+        events_logger = logging.getLogger("autogen_core.events")
+        events_logger.setLevel(logging.INFO)
+        # Remove all existing handlers from this logger
+        events_logger.handlers = []
+        # Prevent propagation to root logger (which would print to console)
+        events_logger.propagate = False
+        # TODO: END REMOVE AFTER DEBUG
+
         system_prompt = self.experiment_type.get_system_prompt()
         user_prompt = self.experiment_type.get_user_prompt()
         assert (
@@ -438,8 +372,116 @@ class AutoGenClient(Client):
         for workbench in wokbenches:
             await workbench.start()
 
-        # async with McpWorkbench(self.server) as workbench:
-        #     # TODO: Convert this to use custom agent in the future
+        # Explicitly collect all tools from workbenches
+        all_tools = []
+        for wb in wokbenches:
+            wb_tools = await wb.list_tools()
+            all_tools.extend(wb_tools)
+        
+        print(f"\n=== DEBUG: Collected {len(all_tools)} tools from MCP ===")
+        for tool in all_tools:
+            tool_name = tool.get('name') if isinstance(tool, dict) else getattr(tool, 'name', 'unknown')
+            print(f"  - {tool_name}")
+        print(f"===================================\n")
+
+        # Debug: Check what tools are available from MCP
+        print(f"\n=== DEBUG: MCP Tools ===")
+        for i, wb in enumerate(wokbenches):
+            print(f"Workbench {i}:")
+            try:
+                tools = await wb.list_tools()
+                print(f"  Available tools: {len(tools)}")
+                for tool in tools:
+                    # Tools might be dicts or objects
+                    if isinstance(tool, dict):
+                        print(f"    - {tool.get('name', 'unknown')}: {tool.get('description', 'No description')[:100]}")
+                    else:
+                        print(f"    - {tool.name}: {tool.description[:100] if hasattr(tool, 'description') else 'No description'}")
+            except Exception as e:
+                print(f"  Error listing tools: {e}")
+                import traceback
+                traceback.print_exc()
+        print(f"========================\n")
+
+
+        # TODO: START DEBUG REASONING
+        import logging
+        import json
+        import io
+        import sys
+        
+        class ReasoningCapture(logging.Handler):
+            """Custom log handler to capture and display reasoning in real-time"""
+            
+            def __init__(self, display_mode="detailed"):
+                super().__init__()
+                self.reasoning_history = []
+                self.display_mode = display_mode
+                self.step_counter = 0
+            
+            def emit(self, record):
+                """Called for each log message - displays reasoning immediately"""
+                if record.name == "autogen_core.events":
+                    try:
+                        log_data = json.loads(record.getMessage())
+                        
+                        if log_data.get("type") == "LLMCall" and "response" in log_data:
+                            response = log_data["response"]
+                            if "choices" in response:
+                                for choice in response["choices"]:
+                                    message = choice.get("message", {})
+                                    reasoning = message.get("reasoning_content")
+                                    tool_calls = message.get("tool_calls", [])
+                                    content = message.get("content")
+                                    finish_reason = choice.get("finish_reason")
+                                    
+                                    if reasoning:
+                                        self.step_counter += 1
+                                        self.reasoning_history.append(reasoning)
+                                        self._display_detailed(reasoning, tool_calls, content, finish_reason)
+                                        sys.stderr.flush()
+                    except (json.JSONDecodeError, KeyError) as e:
+                        pass
+            
+            def _display_detailed(self, reasoning, tool_calls, content, finish_reason):
+                """Detailed display with full reasoning"""
+                sys.stderr.write("\n" + "="*80 + "\n")
+                sys.stderr.write(f"STEP {self.step_counter} - MODEL REASONING\n")
+                sys.stderr.write("="*80 + "\n")
+                sys.stderr.write(f"{reasoning}\n")
+                
+                # Always display content if it exists (text response)
+                if content:
+                    sys.stderr.write("\n" + "-"*80 + "\n")
+                    sys.stderr.write("CONTENT OUTPUT:\n")
+                    sys.stderr.write("-"*80 + "\n")
+                    sys.stderr.write(f"{content}\n")
+                
+                # Always display tool calls if they exist
+                if tool_calls:
+                    sys.stderr.write("\n" + "-"*80 + "\n")
+                    sys.stderr.write("TOOL CALLS OUTPUT:\n")
+                    for tc in tool_calls:
+                        func = tc.get('function', {})
+                        sys.stderr.write(f"  -> {func.get('name')}({func.get('arguments')})\n")
+                
+                sys.stderr.write("="*80 + "\n\n")
+            
+            def get_reasoning_history(self):
+                return self.reasoning_history
+            
+            def clear_reasoning_history(self):
+                self.reasoning_history = []
+                self.step_counter = 0
+
+        
+        # Set up the reasoning capture
+        reasoning_capture = ReasoningCapture()
+        reasoning_capture.setLevel(logging.INFO)
+        logging.getLogger("autogen_core.events").addHandler(reasoning_capture)
+        # TODO: END DEBUG REASONING
+
+        # TODO: Convert this to use custom agent in the future
         agent = AssistantAgent(
             name="Assistant",
             model_client=self.model_client,
@@ -448,7 +490,42 @@ class AutoGenClient(Client):
             max_tool_iterations=self.max_tool_calls,
         )
 
+        # TODO: REMOVE START
+        # Debug: Check what tools the agent has
+        print(f"\n=== DEBUG: Agent Configuration ===")
+        print(f"Agent has workbench: {agent._workbench is not None if hasattr(agent, '_workbench') else 'unknown'}")
+        print(f"Max tool iterations: {self.max_tool_calls}")
+        if hasattr(agent, '_tools'):
+            print(f"Number of tools: {len(agent._tools) if agent._tools else 0}")
+        print(f"===================================\n")
+
+        from autogen_core import EVENT_LOGGER_NAME
+        import logging
+        
+        # Set up detailed logging
+        logging.basicConfig(level=logging.DEBUG)
+        logger = logging.getLogger(EVENT_LOGGER_NAME)
+        logger.setLevel(logging.DEBUG)
+        # TODO: REMOVE END
+
+
         answer_invalid, result = await self.step(agent, user_prompt)
+
+        ## TODO: REMOVE START
+        ## Inspect result structure
+        #if hasattr(result, 'messages'):
+        #    for msg in result.messages:
+        #        print(f"Message: {msg}")
+        #        if hasattr(msg, 'content'):
+        #            print(f"Content: {msg.content}")
+        #        if hasattr(msg, 'metadata'):
+        #            print(f"Metadata: {msg.metadata}")
+
+        #all_reasoning = reasoning_capture.get_reasoning_history()
+        #print("\n==>> All reasoning steps (including intermediate):")
+        #for i, reasoning in enumerate(all_reasoning, 1):
+        #    print(f"{i}. {reasoning}")
+        ## TODO: REMOVE END
 
         for workbench in wokbenches:
             await workbench.stop()

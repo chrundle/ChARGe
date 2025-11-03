@@ -81,6 +81,8 @@ if __name__ == "__main__":
     server_path_1 = "stdio_server_1.py"
     server_path_2 = "stdio_server_2.py"
 
+    print(f"\n\n    ==> server_urls: {server_urls}")
+
     runner = AutoGenClient(
         experiment_type=myexperiment,
         backend=backend,
